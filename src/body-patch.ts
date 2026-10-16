@@ -1,135 +1,131 @@
 /**
- * Anthropic Messages body patch at the fetch layer.
+ * Request-body reshaping at the fetch layer. Two jobs:
  *
- * Applies the same injection rules and guard rails as the header injector,
- * but operating on the JSON body of the outgoing request:
+ * 1. **Anthropic Messages identity patch** (`claude_code_messages`): the
+ *    `system` slot gains the Claude Code identity (or billing) block when no
+ *    Claude Code system signal is present, and `metadata.user_id` becomes
+ *    the measured JSON device/session object.
+ * 2. **opencode Zen free tier** (`opencode_zen` + `opencodeZenFree`): the URL
+ *    is rewritten `/zen` → `/inference` and the `bash`/`read` tool stubs the
+ *    free tier checks for become `tools` — applied only when the body's
+ *    model id names a free model. That model check is why the URL rewrite
+ *    lives here rather than in `url-rewrite.ts`.
  *
- *   - only Anthropic Messages request bodies are touched (must contain both
- *     `messages` and `model`; OpenAI Responses bodies have neither shape
- *     field and must never receive `metadata`/`system` — strict upstreams
- *     like Grok/xAI reject the request with "Argument not supported");
- *   - the `system` slot gains the Claude Code identity (or billing) block
- *     when no Claude Code system signal is present;
- *   - `metadata.user_id` becomes the measured JSON device/session object.
- *
- * Safety: only requests whose resolved profile declares
- * `patchAnthropicBody` (`claude_code_messages`) are patched, and only when
- * the body is parseable JSON we can rewrite (string / Buffer / Uint8Array).
- * A streamed body is passed through untouched.
+ * Guard rails (unchanged from the adapter era):
+ *   - only true Anthropic Messages bodies are identity-patched (must contain
+ *     both `messages` and `model`); OpenAI-family bodies must never receive
+ *     `system`/`metadata`;
+ *   - a streamed (non-re-readable) body passes through untouched;
+ *   - nothing runs before `resolveProfileForUrl` accepted the request — the
+ *     host allowlist and the `off` profile gate every branch.
  */
 
 import type { FetchMiddleware } from "./fetch-pipeline.ts";
-import type { ResolvedCustomHeaderConfig } from "./config.ts";
-import type { GatewayClientProfileId } from "./types.ts";
-import { isAnthropicMessagesUrl, resolveProfileForUrl } from "./profiles.ts";
+import type { ResolvedCustomHeaderConfig } from './config.ts'
+import type { GatewayClientProfileId } from './types.ts'
+import { isAnthropicMessagesUrl, resolveProfileForUrl } from './profiles.ts'
 import {
 	CLAUDE_CODE_IDENTITY_SYSTEM,
 	claudeCodeBillingSystemBlock,
 	getClaudeCodeSessionId,
-} from "./profiles.ts";
-import { sessionKeyOf } from "./session-context.ts";
+} from './profiles.ts'
+import { sessionKeyOf } from './session-context.ts'
+import { isOpencodeFreeModel, patchOpencodeZenFreeBody, rewriteOpencodeZenUrl } from './opencode-zen.ts'
+import { withUrl } from './url-rewrite.ts'
 
-type JsonRecord = Record<string, unknown>;
+type JsonRecord = Record<string, unknown>
 
 function isRecord(value: unknown): value is JsonRecord {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
+	return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 /** Stable device fingerprint (process-level). The CLI uses a 64-hex device id. */
 const STABLE_DEVICE_ID =
-	"1dcf65c37100eb22dea67fe52f799f8e75716d2dfcf1dd5b2acbf07395170f4b";
+	'1dcf65c37100eb22dea67fe52f799f8e75716d2dfcf1dd5b2acbf07395170f4b'
 
 function buildClaudeCodeUserId(sessionKey?: string): string {
-	const sessionId = getClaudeCodeSessionId(sessionKey);
+	const sessionId = getClaudeCodeSessionId(sessionKey)
 	return JSON.stringify({
 		device_id: STABLE_DEVICE_ID,
-		account_uuid: "",
+		account_uuid: '',
 		session_id: sessionId,
-	});
+	})
 }
 
 function hasClaudeCodeSystemSignal(system: unknown): boolean {
-	if (typeof system === "string") {
+	if (typeof system === 'string') {
 		return (
-			system.includes("x-anthropic-billing-header") &&
-			system.includes("cc_entrypoint=sdk-cli")
-		) || system.replace(/\s+/g, " ").includes(CLAUDE_CODE_IDENTITY_SYSTEM);
+			(system.includes('x-anthropic-billing-header') && system.includes('cc_entrypoint=sdk-cli')) ||
+			system.replace(/\s+/g, ' ').includes(CLAUDE_CODE_IDENTITY_SYSTEM)
+		)
 	}
-	if (!Array.isArray(system)) {
-		return false;
-	}
+	if (!Array.isArray(system)) return false
 	for (const entry of system) {
-		if (!isRecord(entry)) continue;
-		const text = entry.text;
-		if (typeof text !== "string" || text === "") continue;
+		if (!isRecord(entry)) continue
+		const text = entry.text
+		if (typeof text !== 'string' || text === '') continue
 		if (
-			text.startsWith("x-anthropic-billing-header") &&
-			text.includes("cc_entrypoint=sdk-cli")
+			text.startsWith('x-anthropic-billing-header') &&
+			text.includes('cc_entrypoint=sdk-cli')
 		) {
-			return true;
+			return true
 		}
-		if (text.replace(/\s+/g, " ").includes(CLAUDE_CODE_IDENTITY_SYSTEM)) {
-			return true;
+		if (text.replace(/\s+/g, ' ').includes(CLAUDE_CODE_IDENTITY_SYSTEM)) {
+			return true
 		}
 	}
-	return false;
+	return false
 }
 
 function ensureMetadataUserId(metadata: unknown, sessionKey?: string): JsonRecord {
 	if (!isRecord(metadata)) {
-		return { user_id: buildClaudeCodeUserId(sessionKey) };
+		return { user_id: buildClaudeCodeUserId(sessionKey) }
 	}
-	const userId = metadata.user_id;
-	// Measured format: JSON string {"device_id":"...","account_uuid":"","session_id":"..."}
-	if (typeof userId === "string" && userId.trim() !== "") {
-		return metadata;
+	const userId = metadata.user_id
+	if (typeof userId === 'string' && userId.trim() !== '') {
+		return metadata
 	}
-	return { ...metadata, user_id: buildClaudeCodeUserId(sessionKey) };
+	return { ...metadata, user_id: buildClaudeCodeUserId(sessionKey) }
 }
 
 /**
- * Pure patch: payload-level, exported for tests. No-op unless the payload
- * is a real Anthropic Messages body.
+ * Pure payload-level patch, exported for tests. No-op unless the payload is
+ * a real Anthropic Messages body.
  */
 export function patchAnthropicMessagesPayload(
 	payload: unknown,
-	mode: "identity" | "billing",
-	config: Pick<ResolvedCustomHeaderConfig, "claudeCliVersion">,
+	mode: 'identity' | 'billing',
+	config: Pick<ResolvedCustomHeaderConfig, 'claudeCliVersion'>,
 	sessionKey?: string,
 ): unknown {
-	if (!isRecord(payload)) {
-		return payload;
-	}
-	// Only true Anthropic Messages bodies (must have messages + model).
-	if (!("messages" in payload) || !("model" in payload)) {
-		return payload;
-	}
+	if (!isRecord(payload)) return payload
+	if (!('messages' in payload) || !('model' in payload)) return payload
 
-	const next: JsonRecord = { ...payload };
+	const next: JsonRecord = { ...payload }
 
 	if (!hasClaudeCodeSystemSignal(next.system)) {
 		const blockText =
-			mode === "billing"
+			mode === 'billing'
 				? claudeCodeBillingSystemBlock(config.claudeCliVersion)
-				: CLAUDE_CODE_IDENTITY_SYSTEM;
-		const injected = { type: "text", text: blockText };
+				: CLAUDE_CODE_IDENTITY_SYSTEM
+		const injected = { type: 'text', text: blockText }
 		if (Array.isArray(next.system)) {
-			next.system = [injected, ...next.system];
-		} else if (typeof next.system === "string" && next.system.trim() !== "") {
-			next.system = [injected, { type: "text", text: next.system }];
+			next.system = [injected, ...next.system]
+		} else if (typeof next.system === 'string' && next.system.trim() !== '') {
+			next.system = [injected, { type: 'text', text: next.system }]
 		} else {
-			next.system = [injected];
+			next.system = [injected]
 		}
 	}
 
-	next.metadata = ensureMetadataUserId(next.metadata, sessionKey);
+	next.metadata = ensureMetadataUserId(next.metadata, sessionKey)
 
-	return next;
+	return next
 }
 
 function urlOf(input: unknown): URL | null {
 	try {
-		if (typeof input === "string") return new URL(input);
+		if (typeof input === 'string') return new URL(input);
 		if (input instanceof URL) return new URL(input);
 		if (input instanceof Request) return new URL(input.url);
 	} catch {
@@ -138,46 +134,87 @@ function urlOf(input: unknown): URL | null {
 	return null;
 }
 
+/**
+ * Best-effort read of the outgoing body as text. String / ArrayBuffer /
+ * Uint8Array (and Buffer) can be re-read safely; a ReadableStream, FormData
+ * or URLSearchParams cannot, and returns null — the request then passes
+ * through untouched.
+ */
 function bodyText(
 	init: RequestInit | undefined,
 	input: Parameters<typeof fetch>[0],
 ): string | null {
 	const body = init?.body ?? (input instanceof Request ? input.body : undefined);
-	if (typeof body === "string") return body;
+	if (typeof body === 'string') return body;
 	if (body instanceof ArrayBuffer) return new TextDecoder().decode(body);
 	if (body instanceof Uint8Array) return new TextDecoder().decode(body);
-	if (body && typeof body === "object" && "buffer" in body && (body as { buffer?: unknown }).buffer instanceof ArrayBuffer) {
+	if (body && typeof body === 'object' && 'buffer' in body && (body as { buffer?: unknown }).buffer instanceof ArrayBuffer) {
 		return new TextDecoder().decode((body as { buffer: ArrayBuffer }).buffer);
 	}
-	// ReadableStream / FormData / URLSearchParams: cannot safely re-read.
 	return null;
 }
 
 /**
- * Middleware — patches the wire body of Anthropic Messages requests when the
- * resolved profile says so. Runs after header injection (Host/UA final),
- * but body and headers are independent here.
+ * Middleware — patches the wire body (and, for Zen free, the URL) of
+ * requests whose resolved profile calls for it. Runs after header injection
+ * so the identity headers are already final; body and headers are
+ * independent here.
  */
 export function createBodyPatchMiddleware(
 	getContext: () => { profile: GatewayClientProfileId; config: ResolvedCustomHeaderConfig },
 ): FetchMiddleware {
 	return async ({ input, init, next }) => {
 		const { profile, config } = getContext();
-		if (profile === "off") {
-			return next(input, init);
-		}
 		const url = urlOf(input);
-		if (!url || !isAnthropicMessagesUrl({ hostname: url.hostname, pathname: url.pathname })) {
+		const resolved = url
+			? resolveProfileForUrl(
+					profile,
+					{ hostname: url.hostname, pathname: url.pathname },
+					config,
+					sessionKeyOf(),
+			  )
+			: undefined;
+		if (!resolved || !url) {
 			return next(input, init);
 		}
 
-		const resolved = resolveProfileForUrl(
-			profile,
-			{ hostname: url.hostname, pathname: url.pathname },
-			config,
-			sessionKeyOf(),
-		);
-		if (!resolved?.patchAnthropicBody) {
+		// ---- opencode Zen free tier: URL + tool stubs, decided by the model id ----
+		if (config.opencodeZenFree && resolved.id === 'opencode_zen') {
+			const zenText = bodyText(init, input);
+			let zenPayload: unknown;
+			if (zenText !== null) {
+				try {
+					zenPayload = JSON.parse(zenText);
+				} catch {
+					zenPayload = undefined;
+				}
+			}
+			if (
+				isRecord(zenPayload) &&
+				typeof zenPayload.model === 'string' &&
+				isOpencodeFreeModel(zenPayload.model)
+			) {
+				const nextUrl = rewriteOpencodeZenUrl(new URL(url));
+				const nextInput = nextUrl.href === url.href ? input : withUrl(input, nextUrl);
+				const headerBag = new Headers(
+					init?.headers ?? (input instanceof Request ? input.headers : undefined),
+				);
+				// the old content-length no longer matches — drop it, Node recomputes.
+				headerBag.delete('content-length');
+				return next(nextInput, {
+					...init,
+					body: JSON.stringify(patchOpencodeZenFreeBody(zenPayload)),
+					headers: headerBag,
+				});
+			}
+			return next(input, init);
+		}
+
+		// ---- Anthropic Messages identity patch ----
+		if (!resolved.patchAnthropicBody) {
+			return next(input, init);
+		}
+		if (!isAnthropicMessagesUrl({ hostname: url.hostname, pathname: url.pathname })) {
 			return next(input, init);
 		}
 
@@ -195,7 +232,7 @@ export function createBodyPatchMiddleware(
 
 		const patched = patchAnthropicMessagesPayload(
 			payload,
-			config.claudeSystemMode,
+			config.claudeSystemBlock,
 			config,
 			sessionKeyOf(),
 		);
@@ -203,13 +240,11 @@ export function createBodyPatchMiddleware(
 			return next(input, init);
 		}
 
-		const nextText = JSON.stringify(patched);
 		const headerBag = new Headers(
 			init?.headers ?? (input instanceof Request ? input.headers : undefined),
 		);
-		const base: RequestInit = { ...init };
 		// the old content-length no longer matches — drop it, Node recomputes.
-		headerBag.delete("content-length");
-		return next(input, { ...base, body: nextText, headers: headerBag });
+		headerBag.delete('content-length');
+		return next(input, { ...init, body: JSON.stringify(patched), headers: headerBag });
 	};
 }

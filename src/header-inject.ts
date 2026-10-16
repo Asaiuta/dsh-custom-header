@@ -13,9 +13,10 @@
  *      regenerates `x-opencode-request` per request exactly like the pi
  *      before_provider_headers path did.
  *
- * Safety gates (unchanged from pi): stripping applies only to hosts listed
- * in autoHosts (empty = never strip); injection follows the profile rules —
- * `auto` requires an autoHosts match, a fixed profile always injects.
+ * Safety gate: both middlewares resolve the profile through
+ * `resolveProfileForUrl`, which refuses every profile unless the request
+ * host is listed in gatewayHosts — stripping, injection and pass-through all
+ * follow that one rule, so nothing outside the allowlist is ever touched.
  */
 
 import type { FetchMiddleware } from "./fetch-pipeline.ts";
@@ -92,33 +93,25 @@ function setOnInit(
 }
 
 /**
- * Middleware 1 — stripping. Deletes `dropHeaders` for autoHosts-listed hosts
- * whenever the profile is not `off`. The pi gateway could unmask a disguise
- * by checking X-Stainless-* presence, so this must run at the very end of
- * the chain that sees the wire headers.
+ * Middleware 1 — stripping. Deletes the resolved profile's `dropHeaders`
+ * (the X-Stainless fingerprint set, for opencode) before sending. The pi
+ * gateway could unmask a disguise by checking X-Stainless-* presence, so
+ * this must run at the very end of the chain that sees the wire headers.
  */
 export function createHeaderStripMiddleware(
 	getContext: () => HeaderInjectContext,
 ): FetchMiddleware {
 	return async ({ input, init, next }) => {
 		const { profile, config } = getContext();
-		if (profile === "off") {
-			return next(input, init);
-		}
-		if (config.autoHosts.length === 0) {
-			return next(input, init);
-		}
 		const url = urlOf(input);
-		if (!url || !config.autoHosts.includes(url.hostname)) {
-			return next(input, init);
-		}
-
-		const resolved = resolveProfileForUrl(
-			profile,
-			{ hostname: url.hostname, pathname: url.pathname },
-			config,
-			sessionKeyOf(),
-		);
+		const resolved = url
+			? resolveProfileForUrl(
+					profile,
+					{ hostname: url.hostname, pathname: url.pathname },
+					config,
+					sessionKeyOf(),
+			  )
+			: undefined;
 		const drop = resolved?.dropHeaders;
 		if (!drop || drop.length === 0) {
 			return next(input, init);

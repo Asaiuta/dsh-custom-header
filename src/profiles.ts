@@ -5,7 +5,8 @@
  *
  * All header values are real-world captures verified against openai/codex
  * source and gateway allowlists — nothing here is invented or inferred, including the opencode
- * `Identifier.ascending()` id scheme and the Claude Code 2.1.220 header set.
+ * `Identifier` id scheme (ascending `msg_`, descending `ses_`) and the Claude
+ * Code 2.1.220 header set.
  */
 
 import { randomBytes, randomUUID } from "node:crypto";
@@ -89,13 +90,16 @@ export function buildCodexDesktopUserAgent(version: string): string {
 	return `codex_app/${version} (Windows NT 10.0; Win64; x64)`
 }
 
-/** opencode measured version (1.18.18). UA shape: `opencode/1.18.18`. */
-
 /**
- * Replicates opencode `Identifier.ascending()`.
+ * Replicates opencode `Identifier` (packages/schema/src/identifier.ts):
+ *   id = prefix + "_" + hex12(timestamp48) + base62(14)
+ * where timestamp48 = (now*0x1000 + counter) masked to 48 bits. `msg_`
+ * request ids are `Identifier.ascending()` (counter as-is); `ses_` session
+ * ids are `Identifier.descending()` — the 48-bit value is bit-inverted so the
+ * newest session sorts first. Zen's free tier rejects a `ses_` id whose low
+ * 12 bits are not an inverted small counter (`0xfff - low < 16`), so the
+ * inversion is load-bearing, not cosmetic.
  *
- * Measured algorithm (chunk-fmetnm3e.js):
- *   id = prefix + "_" + hex12(BigInt(now)*4096n + counter, 6 bytes) + base62(14)
  * Total length 26 (12 hex timestamp chars + 14 random). The counter
  * increments within the same millisecond.
  */
@@ -114,7 +118,7 @@ function randomBase62(length: number): string {
 	return out;
 }
 
-function createOpencodeId(prefix: string): string {
+function createOpencodeId(prefix: string, descending = false): string {
 	const now = Date.now();
 	if (now !== lastIdTimestamp) {
 		lastIdTimestamp = now;
@@ -122,9 +126,13 @@ function createOpencodeId(prefix: string): string {
 	}
 	idCounter++;
 	const value = BigInt(now) * 4096n + BigInt(idCounter);
+	// Mask to 48 bits (12 hex), then bit-invert for descending ids so the
+	// newest sorts first (and so the low 12 bits become an inverted counter).
+	let timestamp48 = value & 0xffffffffffffn;
+	if (descending) timestamp48 = 0xffffffffffffn - timestamp48;
 	let hex = "";
 	for (let i = 0; i < 6; i++) {
-		const byte = Number((value >> BigInt(40 - 8 * i)) & 255n);
+		const byte = Number((timestamp48 >> BigInt(40 - 8 * i)) & 255n);
 		hex += byte.toString(16).padStart(2, "0");
 	}
 	return `${prefix}_${hex}${randomBase62(OPENCODE_ID_LENGTH - 12)}`;
@@ -155,7 +163,7 @@ export function resetSessionIds(): void {
 export function getOpencodeSessionId(key?: string): string {
 	const entry = sessionEntry(key)
 	if (!entry.opencode) {
-		entry.opencode = createOpencodeId('ses')
+		entry.opencode = createOpencodeId('ses', true)
 	}
 	return entry.opencode
 }
@@ -171,22 +179,24 @@ function sessionEntry(key: string | undefined): { claude?: string; opencode?: st
 }
 
 export function nextOpencodeRequestId(): string {
-	return createOpencodeId("msg");
+	return createOpencodeId("msg", false);
 }
 
 /**
- * opencode Zen request headers (measured capture).
+ * opencode Zen request headers (measured capture, updated for 1.19.0).
  *
  * Measured POST /v1/chat/completions:
- *   User-Agent: opencode/1.18.18 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14
+ *   User-Agent: opencode/1.19.0 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14
  *   x-opencode-client: cli
  *   x-opencode-project: global
  *   x-opencode-request: msg_ffb6895960014u17h4vCf7Dri4
- *   x-opencode-session: ses_004976ab7ffewheod46Xg420D5
+ *   x-opencode-session: ses_…       (descending id; see createOpencodeId)
+ *   x-opencode-session-id: ses_…    (same value as x-opencode-session)
  *
  * Note: the opencode provider branch does NOT send
  * x-session-affinity / X-Session-Id — that pair only appears for non-opencode
- * providers (LLMRequestPrep.prepare ternary branch in opencode source).
+ * providers (LLMRequestPrep.prepare ternary branch in opencode source); since
+ * mid-October 2026 Zen's free tier answers 403 FreeTierError when they are sent.
  */
 function buildOpencodeZenHeaders(
 	version: string,
@@ -194,11 +204,13 @@ function buildOpencodeZenHeaders(
 	project: string,
 	sessionKey?: string,
 ): Record<string, string> {
+	const sessionId = getOpencodeSessionId(sessionKey);
 	return {
 		"User-Agent": `opencode/${version} ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14`,
 		"x-opencode-client": client,
 		"x-opencode-project": project,
-		"x-opencode-session": getOpencodeSessionId(sessionKey),
+		"x-opencode-session": sessionId,
+		"x-opencode-session-id": sessionId,
 		"x-opencode-request": nextOpencodeRequestId(),
 	};
 }
@@ -270,7 +282,7 @@ function buildConcreteProfiles(
 	opencodeClient = "cli",
 	opencodeProject = "global",
 	sessionKey?: string,
-	codexVersion: string = DEFAULT_CODEX_CLI_VERSION,
+	codexCliVersion: string = DEFAULT_CODEX_CLI_VERSION,
 	codexDesktopVersion: string = DEFAULT_CODEX_DESKTOP_VERSION,
 ): Record<ConcreteProfileId, GatewayHeaderProfile> {
 	return {
@@ -280,7 +292,7 @@ function buildConcreteProfiles(
 			description:
 				"Root Codex client: User-Agent prefix codex_cli_rs/ + Originator (headless / default transport; DEFAULT_ORIGINATOR in openai/codex).",
 			headers: {
-				"User-Agent": buildCodexCliUserAgent(codexVersion),
+				"User-Agent": buildCodexCliUserAgent(codexCliVersion),
 				Originator: "codex_cli_rs",
 			},
 		},
@@ -290,7 +302,7 @@ function buildConcreteProfiles(
 			description:
 				"Interactive TUI front-end identity: UA prefix codex-tui/ + Originator codex-tui (what interactive `codex` actually sends).",
 			headers: {
-				"User-Agent": buildCodexTuiUserAgent(codexVersion),
+				"User-Agent": buildCodexTuiUserAgent(codexCliVersion),
 				Originator: "codex-tui",
 			},
 		},
@@ -364,7 +376,7 @@ const AUTO_OFF_MENU: Record<"auto" | "off", ProfileMenuEntry> = {
 		id: "auto",
 		label: "auto",
 		description:
-			"Inject only when the request host matches autoHosts: Anthropic Messages paths → Claude; anything else → autoCodexProfile. Empty autoHosts = no injection (safe default).",
+			"Inject only when the request host matches gatewayHosts: Anthropic Messages paths → Claude; anything else → codexFallback. Empty gatewayHosts = no injection (safe default).",
 	},
 	off: {
 		id: "off",
@@ -390,7 +402,8 @@ export function getProfileMenuEntries(config: ResolvedCustomHeaderConfig): Profi
 	});
 }
 
-export function hostMatchesAutoHosts(host: string, hosts: string[]): boolean {
+/** Exact host match or subdomain match (`example.com` covers `api.example.com`). */
+export function hostMatchesGatewayHosts(host: string, hosts: string[]): boolean {
 	const h = host.toLowerCase();
 	return hosts.some((entry) => {
 		const target = entry.toLowerCase().trim();
@@ -429,7 +442,7 @@ function buildProfiles(
 		config.opencodeClient,
 		config.opencodeProject,
 		sessionKey,
-		config.codexVersion,
+		config.codexCliVersion,
 		config.codexDesktopVersion,
 	);
 }
@@ -438,13 +451,14 @@ function buildProfiles(
  * Resolve which concrete profile applies for one request URL.
  *
  * `auto` rules:
- * - autoHosts empty → no injection (avoid touching official APIs)
- * - host not in autoHosts → no injection
- * - host matches: `/v1/messages*` (Anthropic Messages protocol) →
- *   claude_code_messages; anything else → autoCodexProfile
+ * - host matches, `/v1/messages*` (Anthropic Messages protocol) →
+ *   claude_code_messages; anything else → codexFallback
  *
- * A fixed (non-auto/off) profile always injects, regardless of autoHosts —
- * exactly the pi behavior.
+ * The host allowlist gates **every** profile, fixed ones included. The fetch
+ * layer sees only the request URL — never which DSH provider or plugin owns
+ * the request — so a host match is the only evidence that the request
+ * belongs to a gateway this plugin was deployed for. Anything outside the
+ * allowlist, and an empty allowlist, resolve to "no profile" (pass-through).
  *
  * `sessionKey` scopes the session-level ids (x-opencode-session,
  * X-Claude-Code-Session-Id) per DSH conversation.
@@ -455,31 +469,28 @@ export function resolveProfileForUrl(
 	config: ResolvedCustomHeaderConfig,
 	sessionKey?: string,
 ): GatewayHeaderProfile | undefined {
-	const profiles = buildProfiles(config, sessionKey);
-
 	if (profileId === "off") {
 		return undefined;
 	}
 
-	let concrete: GatewayHeaderProfile | undefined;
-
-	if (profileId !== "auto") {
-		concrete = profiles[profileId as ConcreteProfileId];
-	} else {
-		// auto: explicit host allowlist required
-		if (config.autoHosts.length === 0) {
-			return undefined;
-		}
-		if (!url) {
-			return undefined;
-		}
-		if (!hostMatchesAutoHosts(url.hostname, config.autoHosts)) {
-			return undefined;
-		}
-		concrete = isAnthropicMessagesUrl(url)
-			? profiles.claude_code_messages
-			: profiles[config.autoCodexProfile];
+	// Uniform host gate — see the doc comment above.
+	if (config.gatewayHosts.length === 0) {
+		return undefined;
 	}
+	if (!url) {
+		return undefined;
+	}
+	if (!hostMatchesGatewayHosts(url.hostname, config.gatewayHosts)) {
+		return undefined;
+	}
+
+	const profiles = buildProfiles(config, sessionKey);
+	const concrete =
+		profileId === "auto"
+			? isAnthropicMessagesUrl(url)
+				? profiles.claude_code_messages
+				: profiles[config.codexFallback]
+			: profiles[profileId as ConcreteProfileId];
 
 	return applyExtraHeaders(concrete, config.extraHeaders);
 }
@@ -510,18 +521,14 @@ export function describeEffectiveProfile(
 	if (profile) return profile.id;
 
 	if (profileId === "off") return "off";
-
-	if (profileId === "auto") {
-		if (config.autoHosts.length === 0) {
-			return "off (auto with empty autoHosts: safe default, no injection)";
-		}
-		if (!url) {
-			return "off (auto and no request URL information)";
-		}
-		if (!hostMatchesAutoHosts(url.hostname, config.autoHosts)) {
-			return "off (auto and request host not in autoHosts)";
-		}
-		return "off (no effective preset)";
+	if (config.gatewayHosts.length === 0) {
+		return "off (empty gatewayHosts: safe default, no injection)";
+	}
+	if (!url) {
+		return "off (no request URL information)";
+	}
+	if (!hostMatchesGatewayHosts(url.hostname, config.gatewayHosts)) {
+		return "off (request host not in gatewayHosts)";
 	}
 
 	return "off (no effective preset)";

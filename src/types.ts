@@ -17,7 +17,8 @@ export type GatewayClientProfileId =
 	| "claude_code_messages"
 	| "opencode_zen";
 
-export type AutoCodexProfileId = "codex_official" | "codex_tui" | "codex_desktop" | "codex_claude_plugin";
+/** The Codex identities the `auto` profile may fall back to (config `codexFallback`). */
+export type CodexFallbackId = "codex_official" | "codex_tui" | "codex_desktop" | "codex_claude_plugin";
 
 export type ConcreteProfileId = Exclude<GatewayClientProfileId, "auto" | "off">;
 
@@ -39,7 +40,7 @@ export function isGatewayClientProfileId(value: string): value is GatewayClientP
 }
 
 /** The subset of profiles the `auto` path may select for OpenAI-family requests. */
-export function isAutoCodexProfileId(value: string): value is AutoCodexProfileId {
+export function isCodexFallbackId(value: string): value is CodexFallbackId {
 	return (
 		value === "codex_official" ||
 		value === "codex_tui" ||

@@ -1,7 +1,7 @@
 {
   "name": "dsh-custom-header",
-  "description": "Outbound LLM request header modification for DeepSeek Harness (DSH): client-identity header presets (Codex / Claude Code / opencode), per-request dynamic headers, X-Stainless fingerprint stripping, URL rewriting and Anthropic body patching at the fetch transport layer.",
-  "version": "0.1.3",
+  "description": "Outbound LLM request modification for DeepSeek Harness (DSH) at the fetch transport layer: injects client-identity header presets (Codex / Claude Code / opencode), strips X-Stainless fingerprints, rewrites URLs and patches Anthropic bodies inline in the request — provider-agnostic and host-allowlisted.",
+  "version": "0.4.0",
   "license": "MIT",
   "type": "module",
   "main": "lib/index.js",
@@ -10,12 +10,12 @@
       "types": "./lib/types/index.d.ts",
       "default": "./lib/index.js"
     },
-    "./cordis.patch.yml": "./cordis.patch.yml",
-    "./package.json": "./package.json",
     "./client": {
       "types": "./lib/types/client/index.d.ts",
       "default": "./lib/client.js"
-    }
+    },
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
   },
   "dsh": {
     "bundle": {
@@ -24,14 +24,16 @@
     "client": {
       "platform": "web",
       "inject": [
-        "@deepseek-ai/dsh-client-runtime",
-        "@deepseek-ai/dsh-client-ui-slots",
-        "@deepseek-ai/dsh-client-locale"
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-plugin-manager",
+        "@deepseek-ai/dsh-api-remotes"
       ]
     }
   },
   "files": [
     "lib",
+    "stubs",
     "cordis.patch.yml",
     "README.md",
     "README.zh-CN.md",
@@ -47,23 +49,12 @@
     "node": "^22.19 || >=24"
   },
   "peerDependencies": {
-    "@deepseek-ai/cordis": "^4.0.1-rc.1",
-    "@deepseek-ai/dsh-agent": "*",
+    "@deepseek-ai/cordis": "^4.0.1",
     "@deepseek-ai/dsh-llm": "*",
-    "@deepseek-ai/schemastery": "*",
-    "@deepseek-ai/dsh-typert-protocol": "*",
-    "@deepseek-ai/dsh-typert-registry": "*",
-    "@deepseek-ai/dsh-host-apiproxy": "*",
-    "@deepseek-ai/dsh-client-runtime": "*",
-    "@deepseek-ai/dsh-client-ui-slots": "*",
-    "@deepseek-ai/dsh-client-locale": "*",
-    "react": "^18.2.0"
+    "@deepseek-ai/schemastery": "*"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/cordis": {
-      "optional": true
-    },
-    "@deepseek-ai/dsh-agent": {
       "optional": true
     },
     "@deepseek-ai/dsh-llm": {
@@ -71,36 +62,18 @@
     },
     "@deepseek-ai/schemastery": {
       "optional": true
-    },
-    "@deepseek-ai/dsh-typert-protocol": {
-      "optional": true
-    },
-    "@deepseek-ai/dsh-typert-registry": {
-      "optional": true
-    },
-    "@deepseek-ai/dsh-host-apiproxy": {
-      "optional": true
-    },
-    "@deepseek-ai/dsh-client-runtime": {
-      "optional": true
-    },
-    "@deepseek-ai/dsh-client-ui-slots": {
-      "optional": true
-    },
-    "@deepseek-ai/dsh-client-locale": {
-      "optional": true
-    },
-    "react": {
-      "optional": true
     }
   },
   "devDependencies": {
-    "@deepseek-ai/cordis": "4.0.1",
-    "@deepseek-ai/dsh-agent": "0.1.0-rc.6",
-    "@deepseek-ai/dsh-llm": "0.1.0-rc.6",
-    "@deepseek-ai/schemastery": "3.18.1",
+    "@deepseek-ai/cordis": "4.0.4",
+    "@deepseek-ai/dsh-llm": "0.2.0-rc.2",
+    "@deepseek-ai/schemastery": "3.18.4",
     "@types/node": "^22.19.0",
+    "@types/react": "^18.3.0",
+    "@types/react-dom": "^18.3.0",
     "esbuild": "^0.25.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
     "typescript": "^5.9.0"
   },
   "author": "Asaiuta <asaiuta@users.noreply.github.com>",
@@ -111,8 +84,5 @@
   "homepage": "https://github.com/Asaiuta/dsh-custom-header",
   "bugs": {
     "url": "https://github.com/Asaiuta/dsh-custom-header/issues"
-  },
-  "dependencies": {
-    "zod": "^4.4.3"
   }
 }

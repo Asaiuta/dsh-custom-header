@@ -9,6 +9,7 @@
     ],
     "module": "ESNext",
     "moduleResolution": "bundler",
+    "jsx": "react-jsx",
     "rootDir": "src",
     "outDir": "lib/types",
     "declaration": true,
@@ -24,8 +25,7 @@
     },
     "types": [
       "node"
-    ],
-    "jsx": "react-jsx"
+    ]
   },
   "include": [
     "src"

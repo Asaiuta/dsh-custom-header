@@ -1,18 +1,31 @@
 /**
  * dsh-custom-header transport smoke test.
  *
- * Boots two local HTTP servers (one listed in autoHosts, one not) and
- * verifies the fetch pipeline behaves like the pi extension's measured
- * behavior:
- *   1. auto profile + autoHosts match: URL rewrite + Claude headers + body patch
+ * Boots one local HTTP capture server and verifies the fetch pipeline
+ * behaves like the pi extension's measured behavior, plus the 0.4.0
+ * uniform-gating rule (fixed profiles are host-allowlisted too):
+ *   1. auto profile + gatewayHosts match: URL rewrite + Claude headers + body patch
  *   2. auto profile: Codex fallback preset on chat/completions
  *   3. opencode_zen fixed profile: per-request msg id, stable session id,
  *      X-Stainless fingerprint headers stripped
- *   4. host outside autoHosts: nothing touched
+ *   4. auto profile, host outside gatewayHosts: nothing touched
+ *   5. off profile: nothing touched
+ *   6. per-conversation session id isolation
+ *   7. prefixed /v1/messages routes to the Claude profile
+ *   8. codex_tui preset identity
+ *   9. fixed profile: gated by gatewayHosts exactly like auto (the 0.4.0
+ *      behavior change — a fixed profile is not global)
  *
  * Usage: node tests/smoke.mjs
+ *
+ * Set SMOKE_LIB to a bundle path to test a build without touching `lib/`
+ * (useful while a live desktop app watches the mounted plugin):
+ *   esbuild src/index.ts --bundle --format=esm --platform=node --target=node22 \
+ *     --external:@deepseek-ai/* --outfile=%TEMP%/dch-smoke/index.js
+ *   set SMOKE_LIB=%TEMP%/dch-smoke/index.js && node tests/smoke.mjs
  */
 import http from 'node:http'
+import { pathToFileURL } from 'node:url'
 
 // Save the pristine fetch before the pipeline patches globalThis (the
 // pipeline's accessor replacement makes undici's teardown assert on exit).
@@ -21,13 +34,19 @@ const originalFetchDesc = Object.getOwnPropertyDescriptor(globalThis, 'fetch')
 // The plugin's session-context singleton: the llm/stream wrapper runs adapter
 // iterations inside it, and the fetch middlewares read it back. The smoke
 // harness drives it directly around fetch to simulate that wrapper.
-const { requestSessionContext } = await import('../lib/index.js')
+const libUrl = process.env.SMOKE_LIB
+  ? pathToFileURL(process.env.SMOKE_LIB).href
+  : new URL('../lib/index.js', import.meta.url).href
 
-const { registerFetchMiddleware } = await import('../lib/index.js')
-const { createUrlRewriteMiddleware } = await import('../lib/index.js')
-const { createHeaderStripMiddleware, createHeaderInjectMiddleware } = await import('../lib/index.js')
-const { createBodyPatchMiddleware } = await import('../lib/index.js')
-const { normalizeCustomHeaderConfig } = await import('../lib/index.js')
+const {
+  requestSessionContext,
+  registerFetchMiddleware,
+  createUrlRewriteMiddleware,
+  createHeaderStripMiddleware,
+  createHeaderInjectMiddleware,
+  createBodyPatchMiddleware,
+  normalizeCustomHeaderConfig,
+} = await import(libUrl)
 
 function startCaptureServer() {
   const captured = []
@@ -52,7 +71,7 @@ function configure(configOverrides) {
   const state = { profile: config.profile, config }
   registerFetchMiddleware({
     name: 't-url', priority: 5,
-    middleware: createUrlRewriteMiddleware(() => ({ enabled: state.profile !== 'off', hosts: state.config.autoHosts, rewrites: state.config.urlRewrites })),
+    middleware: createUrlRewriteMiddleware(() => ({ enabled: state.profile !== 'off', hosts: state.config.gatewayHosts, rewrites: state.config.urlRewrites })),
   })
   registerFetchMiddleware({
     name: 't-strip', priority: 6,
@@ -82,7 +101,7 @@ function check(name, cond, detail) {
 const gated = await startCaptureServer()
 
 // ---- scenario 1: auto + anthropic messages + rewrite + body patch ----
-configure({ profile: 'auto', autoHosts: ['127.0.0.1'], urlRewrites: { '/v1/messages': { appendQuery: 'beta=true' } } })
+configure({ profile: 'auto', gatewayHosts: ['127.0.0.1'], urlRewrites: { '/v1/messages': { appendQuery: 'beta=true' } } })
 const base = `http://127.0.0.1:${gated.port}`
 await fetch(`${base}/v1/messages?stream=true`, {
   method: 'POST',
@@ -111,7 +130,7 @@ const body2 = JSON.parse(r2.body)
 check('s2 body untouched (no metadata)', body2.metadata === undefined, JSON.stringify(body2.metadata))
 
 // ---- scenario 3: opencode_zen fixed profile (per-request ids + strip) ----
-configure({ profile: 'opencode_zen', autoHosts: ['127.0.0.1'], opencodeVersion: '1.18.18' })
+configure({ profile: 'opencode_zen', gatewayHosts: ['127.0.0.1'], opencodeVersion: '1.18.18' })
 const zenHeaders = []
 for (let i = 0; i < 2; i++) {
   await fetch(`${base}/v1/chat/completions`, {
@@ -134,9 +153,9 @@ if (zenHeaders[0]['accept-language'] !== undefined) {
   console.log('  note s3 accept-language is a known undici-injected residual (unremovable at fetch layer)')
 }
 
-// ---- scenario 4: host outside autoHosts untouched ----
+// ---- scenario 4: host outside gatewayHosts untouched ----
 // 'localhost' resolves to the same server but its hostname is not in
-// autoHosts ('127.0.0.1'), so nothing may be touched.
+// gatewayHosts ('127.0.0.1'), so nothing may be touched.
 const off = `http://localhost:${gated.port}`
 await fetch(`${off}/v1/chat/completions`, {
   method: 'POST',
@@ -144,11 +163,11 @@ await fetch(`${off}/v1/chat/completions`, {
   body: JSON.stringify({ model: 'gpt-5', messages: [{ role: 'user', content: 'hi' }] }),
 })
 const r4 = gated.captured.at(-1)
-check('s4 no UA injection outside autoHosts', !String(r4.headers['user-agent'] ?? '').startsWith('codex_'), r4.headers['user-agent'])
-check('s4 no originator outside autoHosts', r4.headers['originator'] === undefined, String(r4.headers['originator']))
+check('s4 no UA injection outside gatewayHosts', !String(r4.headers['user-agent'] ?? '').startsWith('codex_'), r4.headers['user-agent'])
+check('s4 no originator outside gatewayHosts', r4.headers['originator'] === undefined, String(r4.headers['originator']))
 
 // ---- scenario 5: off profile ----
-configure({ profile: 'off', autoHosts: ['127.0.0.1'] })
+configure({ profile: 'off', gatewayHosts: ['127.0.0.1'] })
 await fetch(`${base}/v1/messages`, {
   method: 'POST',
   headers: { 'content-type': 'application/json' },
@@ -161,7 +180,7 @@ check('s5 off profile: no claude UA', !String(r5.headers['user-agent'] ?? '').st
 // ---- scenario 6: per-conversation session id isolation ----------------
 // Ported behavior must scope x-opencode-session per DSH conversation instead
 // of sharing one process-wide id (pi is single-session; DSH is not).
-configure({ profile: 'opencode_zen', autoHosts: ['127.0.0.1'], opencodeVersion: '1.18.18' })
+configure({ profile: 'opencode_zen', gatewayHosts: ['127.0.0.1'], opencodeVersion: '1.18.18' })
 const sendZen = () =>
   fetch(`${base}/v1/chat/completions`, {
     method: 'POST',
@@ -182,7 +201,7 @@ check('s6 A differs from default', sesA1 !== sesDefault, `${sesA1} vs ${sesDefau
 // ---- scenario 7: anthropic protocol with a prefixed gateway path ------
 // pi decides by model.api (path-independent); the fetch layer must recognize
 // {baseUrl}/v1/messages prefixed routes the same way.
-configure({ profile: 'auto', autoHosts: ['127.0.0.1'] })
+configure({ profile: 'auto', gatewayHosts: ['127.0.0.1'] })
 await fetch(`${base}/proxy/anthropic/v1/messages`, {
   method: 'POST',
   headers: { 'content-type': 'application/json' },
@@ -196,7 +215,7 @@ check('s7 prefixed path body patched', Array.isArray(body7.system) && body7.syst
 // ---- scenario 8: codex_tui preset (the TUI front-end's real identity) ----
 // Interactive `codex` sessions send codex-tui/ UA + Originator: codex-tui
 // (openai/codex is_first_party_originator whitelist + TUI client_name).
-configure({ profile: 'codex_tui', autoHosts: ['127.0.0.1'] })
+configure({ profile: 'codex_tui', gatewayHosts: ['127.0.0.1'] })
 await fetch(`${base}/v1/chat/completions`, {
   method: 'POST',
   headers: { 'content-type': 'application/json' },
@@ -205,6 +224,29 @@ await fetch(`${base}/v1/chat/completions`, {
 const r8 = gated.captured.at(-1)
 check('s8 codex-tui UA injected', String(r8.headers['user-agent']) === 'codex-tui/0.147.0 (Windows 10.0.19045; x86_64) WindowsTerminal', r8.headers['user-agent'])
 check('s8 codex-tui originator', r8.headers['originator'] === 'codex-tui', String(r8.headers['originator']))
+
+// ---- scenario 9: fixed profiles are host-allowlisted too (0.4.0) ------
+// In 0.1.x a fixed profile injected globally; since 0.4.0 every profile —
+// fixed ones included — goes through the same gatewayHosts gate. A fixed
+// profile must touch its listed host and leave every other host alone.
+configure({ profile: 'claude_code_messages', gatewayHosts: ['127.0.0.1'] })
+await fetch(`${base}/v1/messages`, {
+  method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({ model: 'claude-sonnet-4-5', messages: [{ role: 'user', content: 'hi' }] }),
+})
+const r9in = gated.captured.at(-1)
+check('s9 fixed profile injects on listed host', String(r9in.headers['user-agent']).startsWith('claude-cli/'), r9in.headers['user-agent'])
+
+await fetch(`${off}/v1/messages`, {
+  method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({ model: 'claude-sonnet-4-5', messages: [{ role: 'user', content: 'hi' }] }),
+})
+const r9out = gated.captured.at(-1)
+check('s9 fixed profile untouched outside gatewayHosts', !String(r9out.headers['user-agent'] ?? '').startsWith('claude-cli'), r9out.headers['user-agent'])
+const body9out = JSON.parse(r9out.body)
+check('s9 no body patch outside gatewayHosts', body9out.system === undefined, JSON.stringify(body9out.system))
 
 gated.server.closeAllConnections?.()
 gated.server.close()
