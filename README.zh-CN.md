@@ -78,6 +78,7 @@ fetch 席位的代价是：识别一个请求只能靠 URL（永远看不到它�
 | 403 诊断 | `index.ts` + `response-hints.ts` |
 | 设置 schema（全部 volatile） | `config.ts`（`ConfigSchema`，schemastery） |
 | 配置页 | `client/index.tsx`（`settings.section` + `plugins.row.config`） |
+| 场景选择器（意图 → 暂存 `profile`） | `client/scenarios.ts` |
 | 页面文案（中 / 英） | `client/locales.ts` |
 | 页面控件 + 字段规格 | `client/fields.tsx` |
 | 页面样式表 | `client/styles.ts` |
@@ -282,7 +283,7 @@ ctx.dshCustomHeader.status()                      // 诊断快照
 ```bash
 npm install
 npm run typecheck   # tsc 对着 stubs/ 检查，不是 node_modules —— 见下
-npm run build       # esbuild → lib/index.js + lib/types（声明文件）
+npm run build       # esbuild → lib/index.js + lib/client.js；tsc → lib/types（声明文件）
 npm run check       # typecheck + build
 node tests/smoke.mjs  # 本地假网关；9 场景 31 断言
 ```

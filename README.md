@@ -91,6 +91,7 @@ seat, on the bundle's own row in the **Plugins page**
 | 403 diagnostics | `index.ts` + `response-hints.ts` |
 | settings schema (all volatile) | `config.ts` (`ConfigSchema`, schemastery) |
 | configuration page | `client/index.tsx` (`settings.section` + `plugins.row.config`) |
+| scenario tabs → staged `profile` | `client/scenarios.ts` |
 | page copy (zh / en) | `client/locales.ts` |
 | page controls + field specs | `client/fields.tsx` |
 | page stylesheet | `client/styles.ts` |
@@ -315,7 +316,7 @@ ctx.dshCustomHeader.status()                      // diagnostics snapshot
 ```bash
 npm install
 npm run typecheck            # tsc against stubs/, not node_modules — see below
-npm run build                # esbuild → lib/index.js + lib/types (declarations)
+npm run build                # esbuild → lib/index.js + lib/client.js; tsc → lib/types (declarations)
 npm run check                # typecheck + build
 node tests/smoke.mjs         # local capture server; 9 scenarios, 31 checks
 ```
