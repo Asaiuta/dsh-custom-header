@@ -7,9 +7,10 @@
  *    the measured JSON device/session object.
  * 2. **opencode Zen free tier** (`opencode_zen` + `opencodeZenFree`): the URL
  *    is rewritten `/zen` → `/inference` and the `bash`/`read` tool stubs the
- *    free tier checks for become `tools` — applied only when the body's
- *    model id names a free model. That model check is why the URL rewrite
- *    lives here rather than in `url-rewrite.ts`.
+ *    free tier checks for are appended to `tools` (the caller's own tools are
+ *    kept) — applied only when the body's model id names a free model. That
+ *    model check is why the URL rewrite lives here rather than in
+ *    `url-rewrite.ts`.
  *
  * Guard rails (unchanged from the adapter era):
  *   - only true Anthropic Messages bodies are identity-patched (must contain

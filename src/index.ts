@@ -281,7 +281,7 @@ export type { GatewayHeaderProfile }
 export { resolveProfileForUrl, getProfileMenuEntries, hostMatchesGatewayHosts, describeEffectiveProfile, isAnthropicMessagesUrl } from './profiles.ts'
 export { normalizeCustomHeaderConfig, CUSTOM_HEADER_DEFAULTS, readLiveConfig, type ResolvedCustomHeaderConfig } from './config.ts'
 export { patchAnthropicMessagesPayload } from './body-patch.ts'
-export { isOpencodeFreeModel, patchOpencodeZenFreeBody, rewriteOpencodeZenUrl } from './opencode-zen.ts'
+export { isOpencodeFreeModel, patchOpencodeZenFreeBody, rewriteOpencodeZenUrl, ZEN_TOOL_STUB, ZEN_BASH_TOOL_NAME, ZEN_READ_TOOL_NAME } from './opencode-zen.ts'
 export { isGatewayClientProfileId } from './types.ts'
 export { registerFetchMiddleware, ensureFetchPipeline, type FetchMiddleware } from './fetch-pipeline.ts'
 export { rewritePath, rewriteUrlIfNeeded, withUrl, type UrlRewriteTarget, type UrlRewriteContext } from './url-rewrite.ts'

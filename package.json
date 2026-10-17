@@ -1,7 +1,7 @@
 {
   "name": "dsh-custom-header",
   "description": "Outbound LLM request modification for DeepSeek Harness (DSH) at the fetch transport layer: injects client-identity header presets (Codex / Claude Code / opencode), strips X-Stainless fingerprints, rewrites URLs and patches Anthropic bodies inline in the request — provider-agnostic and host-allowlisted.",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "license": "MIT",
   "type": "module",
   "main": "lib/index.js",

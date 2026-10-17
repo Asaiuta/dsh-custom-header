@@ -15,6 +15,9 @@
  *   8. codex_tui preset identity
  *   9. fixed profile: gated by gatewayHosts exactly like auto (the 0.4.0
  *      behavior change — a fixed profile is not global)
+ *  10. opencode Zen free tier: the `bash`/`read` stubs are APPENDED to the
+ *      caller's tools, never substituted for them (0.4.0 replaced the array,
+ *      which left real sessions holding two stubs and no real tools)
  *
  * Usage: node tests/smoke.mjs
  *
@@ -46,6 +49,10 @@ const {
   createHeaderInjectMiddleware,
   createBodyPatchMiddleware,
   normalizeCustomHeaderConfig,
+  rewriteOpencodeZenUrl,
+  ZEN_TOOL_STUB,
+  ZEN_BASH_TOOL_NAME,
+  ZEN_READ_TOOL_NAME,
 } = await import(libUrl)
 
 function startCaptureServer() {
@@ -247,6 +254,79 @@ const r9out = gated.captured.at(-1)
 check('s9 fixed profile untouched outside gatewayHosts', !String(r9out.headers['user-agent'] ?? '').startsWith('claude-cli'), r9out.headers['user-agent'])
 const body9out = JSON.parse(r9out.body)
 check('s9 no body patch outside gatewayHosts', body9out.system === undefined, JSON.stringify(body9out.system))
+
+// ---- scenario 10: Zen free tier must APPEND, not substitute -------------
+// The gate wants `bash` and `read` *offered*; it does not require them to be the
+// only tools. 0.4.0 replaced the whole `tools` array with the two stubs, so a
+// real session reached the model with two unusable tools and none of its own:
+// models that guessed real names (`ops_bash`, `ff_read`) kept working, models
+// that trusted the stub text refused the task outright, and a model that called
+// the stub name got `unknown tool "bash"`.
+const callerTools = [
+  { type: 'function', function: { name: 'ops_bash', description: 'run commands', parameters: { type: 'object', properties: { command: { type: 'string' } }, required: ['command'] } } },
+  { type: 'function', function: { name: 'ff_read', description: 'read source', parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] } } },
+]
+configure({ profile: 'opencode_zen', gatewayHosts: ['127.0.0.1'], opencodeZenFree: true })
+await fetch(`${base}/v1/chat/completions`, {
+  method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({ model: 'deepseek-v4.1-flash-free', messages: [{ role: 'user', content: 'hi' }], tools: callerTools }),
+})
+const body10 = JSON.parse(gated.captured.at(-1).body)
+const names10 = body10.tools.map((t) => t.function.name)
+check('s10 caller tools preserved', names10.includes('ops_bash') && names10.includes('ff_read'), names10.join(','))
+check('s10 bash stub appended', names10.includes(ZEN_BASH_TOOL_NAME), names10.join(','))
+check('s10 read stub appended', names10.includes(ZEN_READ_TOOL_NAME), names10.join(','))
+check('s10 no duplicate tool names', new Set(names10).size === names10.length, names10.join(','))
+check('s10 stream forced on', body10.stream === true, String(body10.stream))
+const bash10 = body10.tools.find((t) => t.function.name === ZEN_BASH_TOOL_NAME)
+check('s10 bash stub keeps its non-empty schema', bash10?.function?.parameters?.required?.[0] === 'command', JSON.stringify(bash10?.function?.parameters))
+check('s10 stub description is the suppression text', bash10?.function?.description === ZEN_TOOL_STUB, String(bash10?.function?.description))
+
+// a caller that already offers `read` keeps its own schema — no duplicate entry
+await fetch(`${base}/v1/chat/completions`, {
+  method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({
+    model: 'deepseek-v4.1-flash-free',
+    messages: [{ role: 'user', content: 'hi' }],
+    tools: [{ type: 'function', function: { name: 'read', description: 'real reader', parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] } } }],
+  }),
+})
+const body10b = JSON.parse(gated.captured.at(-1).body)
+const names10b = body10b.tools.map((t) => t.function.name)
+check('s10b caller read not duplicated', names10b.filter((n) => n === 'read').length === 1, names10b.join(','))
+check('s10b caller read schema wins', body10b.tools.find((t) => t.function.name === 'read').function.description === 'real reader', JSON.stringify(body10b.tools))
+check('s10b bash still appended', names10b.includes(ZEN_BASH_TOOL_NAME), names10b.join(','))
+
+// a paid model id is not a free one: the body must pass through untouched
+await fetch(`${base}/v1/chat/completions`, {
+  method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({ model: 'deepseek-v4.1-flash', messages: [{ role: 'user', content: 'hi' }], tools: callerTools }),
+})
+const body10c = JSON.parse(gated.captured.at(-1).body)
+check('s10c non-free model: tools untouched', body10c.tools.length === callerTools.length && !body10c.tools.some((t) => t.function.name === 'bash'), body10c.tools.map((t) => t.function.name).join(','))
+check('s10c non-free model: stream untouched', body10c.stream === undefined, String(body10c.stream))
+
+// the switch off: nothing runs, even for a free model id
+configure({ profile: 'opencode_zen', gatewayHosts: ['127.0.0.1'], opencodeZenFree: false })
+await fetch(`${base}/v1/chat/completions`, {
+  method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({ model: 'deepseek-v4.1-flash-free', messages: [{ role: 'user', content: 'hi' }], tools: callerTools }),
+})
+const body10d = JSON.parse(gated.captured.at(-1).body)
+check('s10d opencodeZenFree off: tools untouched', body10d.tools.length === callerTools.length, body10d.tools.map((t) => t.function.name).join(','))
+
+// pure URL rewrite (the middleware path is host-gated to opencode.ai, which a
+// local capture server cannot be, so the rule is asserted directly)
+const zenUrl = (p) => rewriteOpencodeZenUrl(new URL(`https://opencode.ai${p}`)).pathname
+check('s10e /zen → /inference', zenUrl('/zen/v1/chat/completions') === '/inference/v1/chat/completions', zenUrl('/zen/v1/chat/completions'))
+check('s10e /zen root → /inference root', zenUrl('/zen') === '/inference', zenUrl('/zen'))
+check('s10e /zen/go left alone', zenUrl('/zen/go/v1/chat/completions') === '/zen/go/v1/chat/completions', zenUrl('/zen/go/v1/chat/completions'))
+check('s10e other host left alone', rewriteOpencodeZenUrl(new URL('https://example.com/zen/v1/x')).href === 'https://example.com/zen/v1/x', 'example.com touched')
+check('s10e non-zen path left alone', zenUrl('/v1/chat/completions') === '/v1/chat/completions', zenUrl('/v1/chat/completions'))
 
 gated.server.closeAllConnections?.()
 gated.server.close()

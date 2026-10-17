@@ -95,7 +95,7 @@ export const en = {
 
 	opencodeZenFree: 'opencode Zen free tier',
 	opencodeZenFreeHint: 'Rewrites /zen to /inference and adds tool stubs.',
-	opencodeZenFreeHelp: 'Zen’s free tier no longer accepts header spoofing alone: it wants the request on `/inference` and expects `bash` and `read` tool stubs to be declared. Turning this on does both, for the free model ids (`*-free`, `big-pickle`, `grok-code`) only. Point the OpenAI root at `https://opencode.ai/zen`.',
+	opencodeZenFreeHelp: 'Zen’s free tier no longer accepts header spoofing alone: it wants the request on `/inference` and expects `bash` and `read` tool stubs to be declared. Turning this on does both, for the free model ids (`*-free`, `big-pickle`, `grok-code`) only. The stubs are added to the tools already in the request, never in place of them, and a name the request already offers is left alone. Point the OpenAI root at `https://opencode.ai/zen`.',
 
 	extraHeaders: 'Extra headers',
 	extraHeadersHelp: 'Merged onto every profile, after the preset’s own headers — so a name here wins over the preset. Useful when a gateway wants a header this plugin does not model. Header names are case-insensitive; values are sent verbatim.',
@@ -179,7 +179,7 @@ export const zh: Record<CustomHeaderKey, string> = {
 
 	opencodeZenFree: 'opencode Zen 免费档',
 	opencodeZenFreeHint: '把 /zen 改写到 /inference 并补上工具桩。',
-	opencodeZenFreeHelp: 'Zen 的免费档不再只靠改请求头就能过：它要求请求走 `/inference`，并且要声明 `bash` 与 `read` 两个工具桩。打开这一项会同时做这两件事，仅对免费模型（`*-free`、`big-pickle`、`grok-code`）生效。OpenAI 根地址请指向 `https://opencode.ai/zen`。',
+	opencodeZenFreeHelp: 'Zen 的免费档不再只靠改请求头就能过：它要求请求走 `/inference`，并且要声明 `bash` 与 `read` 两个工具桩。打开这一项会同时做这两件事，仅对免费模型（`*-free`、`big-pickle`、`grok-code`）生效。工具桩是**追加**到请求已有的工具之后，不会取代它们；请求已经提供过的名字也不会重复插入。OpenAI 根地址请指向 `https://opencode.ai/zen`。',
 
 	extraHeaders: '额外请求头',
 	extraHeadersHelp: '合并到所有预设之上，且在预设自带头之后——所以这里同名会覆盖预设。当网关要的请求头本插件没有建模时用它。请求头名不区分大小写，值原样发送。',
